@@ -1,0 +1,14 @@
+name = "gender-reveal-app"
+compatibility_date = "2024-09-23"
+pages_build_output_dir = "public"
+
+# Cloudflare KV: 性別データの保存先
+# `wrangler kv namespace create GENDER_KV` で作成した ID に書き換えてください。
+[[kv_namespaces]]
+binding = "GENDER_KV"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+
+# ローカル開発用（本番の ADMIN_PASSWORD は Cloudflare ダッシュボードの
+# Pages > Settings > Environment variables で Secret として設定してください）
+[vars]
+ADMIN_PASSWORD = "change-me-please"
