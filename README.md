@@ -218,6 +218,146 @@ git push
 - デプロイ状況は Cloudflareダッシュボードの対象プロジェクト → **Deployments** タブで確認できます
 - Production / Preview はそれぞれ独立して環境変数・KVバインディングを設定する必要があります（後述）
 
+### 6-2. よくあるエラー: `It looks like you've run a Workers-specific command in a Pages project`
+
+ビルドログに以下のようなエラーが出てデプロイに失敗する場合があります。
+
+```
+Executing user deploy command: npx wrangler deploy
+✘ [ERROR] It looks like you've run a Workers-specific command in a Pages project.
+  For Pages, please run `wrangler pages deploy` instead.
+Failed: error occurred while running deploy command
+```
+
+**原因**: Cloudflareの新しいビルド管理画面（Workers & Pages統合UI）が、リポジトリ内に
+`wrangler.toml` があることを検知し、デプロイコマンドを自動的に Workers用の
+`npx wrangler deploy` に設定してしまうことがあります。このプロジェクトは
+Pagesの `functions/` + 静的ファイル構成なので、`wrangler pages deploy` を
+使う必要があります。
+
+**対処方法（ダッシュボードでデプロイコマンドを修正）**:
+
+1. Cloudflareダッシュボード → 対象の Pages プロジェクトを開く
+2. **Settings** → **Builds**（環境によっては「Build & deployments」や
+   「Build configuration」と表示されます）を開く
+3. **Deploy command** の項目を探し、「Edit」または鉛筆アイコンをクリック
+4. 値を次のように変更します
+
+   ```
+   npx wrangler pages deploy public
+   ```
+
+5. 保存し、**Deployments** タブから最新のデプロイを **Retry deployment**
+   するか、何か1つコミットしてpushして再デプロイをトリガーします
+
+もし「Deploy command」の項目が見当たらない場合は、プロジェクトの作成をやり直し、
+**Workers & Pages** → **Create application** → **Pages** タブ（**Workers** タブではなく）
+から **Connect to Git** を選び直してください。UIのバージョンによっては
+Pagesタブから作成すると、そもそもこのデプロイコマンドの概念自体が現れず、
+自動でPages用の処理が行われます。
+
+**代替手段**: ダッシュボードの設定を変更してもうまくいかない場合は、
+GitHub連携（自動デプロイ）を使わず、9章の「Wrangler CLIから直接デプロイする方法」
+（`npx wrangler pages deploy public`をローカルやCI上で手動実行）に切り替えても
+同じ成果物をデプロイできます。
+
+### 6-3. よくあるエラー: `Authentication error [code: 10000]`
+
+6-2の対処でデプロイコマンドは正しく `npx wrangler pages deploy public` が
+実行されるようになったものの、以下のように認証エラーで失敗することがあります。
+
+```
+Executing user deploy command: npx wrangler pages deploy public
+✘ [ERROR] A request to the Cloudflare API (.../pages/projects/gender-reveal-app) failed.
+  Authentication error [code: 10000]
+📎 It looks like you are authenticating Wrangler via a custom API token set in an environment variable.
+```
+
+**原因**: Cloudflareのビルド環境が自動的に用意する `CLOUDFLARE_API_TOKEN` に、
+Cloudflare Pages プロジェクトを操作する権限（Pages: Edit）が含まれていないことが
+あります。ログに「Super Administrator」と表示されていても、実際にビルドで
+使われているのはその管理者アカウント全体の権限ではなく、権限を絞った専用トークン
+であるため、Pages APIへのアクセスだけ拒否されるという現象です。これは
+Cloudflareの「Workers」と「Pages」が統合される過渡期に起きやすい既知の不具合です。
+
+ダッシュボードのトークン発行設定を探して直すよりも、**自分で発行した権限確実な
+APIトークンを使ってGitHub Actionsからデプロイする方法に切り替えるのが確実**です。
+6-4で手順を説明します。
+
+### 6-4. もっと確実な方法: GitHub Actionsでデプロイする（推奨）
+
+Cloudflare側の自動ビルド（Git連携）に権限の問題が起きている間は、GitHub Actions
+から自分で発行したAPIトークンを使ってデプロイする方法に切り替えるのがおすすめです。
+この方法なら権限不足になることがなく、GitHubへのpushをきっかけに確実にデプロイされます。
+
+#### 6-4-1. Cloudflare APIトークンを作成する
+
+1. https://dash.cloudflare.com/profile/api-tokens を開く
+2. 「Create Token」→「Create Custom Token」を選択
+3. 以下を設定
+   - Token name: 任意（例: `gender-reveal-app-deploy`）
+   - Permissions: **Account** / **Cloudflare Pages** / **Edit**
+   - Account Resources: **Include** / 対象のアカウント（`Mit12674@gmail.com's Account`）
+4. 「Continue to summary」→「Create Token」
+5. 表示されたトークンをコピー（**この画面を閉じると二度と表示されません**）
+
+#### 6-4-2. GitHubリポジトリにSecretsを登録する
+
+対象リポジトリ → **Settings** → **Secrets and variables** → **Actions** →
+「New repository secret」で、以下の2つを登録します。
+
+| Name | Value |
+|---|---|
+| `CLOUDFLARE_API_TOKEN` | 6-4-1で作成したトークン |
+| `CLOUDFLARE_ACCOUNT_ID` | `3ae890c8705a2a84b96d9698814d8cfb`（Cloudflareダッシュボードの右下、または前回のビルドログの「Account ID」欄に表示されていたものです。念のため https://dash.cloudflare.com のホーム画面右サイドバーでも確認できます） |
+
+#### 6-4-3. ワークフローファイル
+
+このプロジェクトには `.github/workflows/deploy.yml` を同梱済みです。内容は以下の通りで、
+`main`ブランチへのpushをトリガーに `wrangler pages deploy` を実行します。追加の設定は不要です。
+
+```yaml
+name: Deploy to Cloudflare Pages
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy public --project-name=gender-reveal-app
+```
+
+Secretsを登録した状態でこのファイルをpush（またはリポジトリに追加）すれば、
+GitHubの **Actions** タブでデプロイの進行状況を確認できます。
+
+#### 6-4-4. Cloudflare側の自動ビルドを止める（任意・推奨）
+
+GitHub Actionsでデプロイするようになったら、Cloudflare側の失敗し続ける自動ビルドは
+不要なので止めておくと通知が煩わしくありません。
+
+1. Cloudflareダッシュボード → 対象の Pages プロジェクト → **Settings** → **Builds**
+2. Git連携の項目から「Disconnect」（または「Manage git connection」→切断）を選択
+
+Git連携を切断しても、GitHub Actions側からの `wrangler pages deploy` による
+デプロイ（Direct Upload）には影響ありません。KVバインディングや環境変数
+（`ADMIN_PASSWORD`）は引き続き4-3章・7章の手順でダッシュボードから設定してください
+（これらはデプロイ方法に関わらず同じプロジェクトに対して設定します）。
+
 ## 7. 環境変数（ADMIN_PASSWORD）の設定
 
 **必ず Secret として設定してください**（`wrangler.toml` の `[vars]` はローカル開発の初期値です。
